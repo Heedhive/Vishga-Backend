@@ -1,34 +1,37 @@
-from flask import Blueprint, request, jsonify, current_app
-import sqlite3
-import os
+from flask import Blueprint, request, jsonify, current_app, send_file
 from werkzeug.utils import secure_filename
+import os
+import io
+
+from api.cart import db  # reuse same SQLAlchemy instance
 
 products_bp = Blueprint('products', __name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'database.db')
 
-def init_db_for_products():
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                prize REAL NOT NULL,
-                details TEXT,
-                line_description TEXT, 
-                benefit TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS product_images (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_id INTEGER NOT NULL,
-                filename TEXT NOT NULL,
-                FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-            )
-        ''')
-        conn.commit()
+# ---- Models ----
+class Product(db.Model):
+    __tablename__ = "products"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(255), nullable=False)
+    prize = db.Column(db.Float, nullable=False)
+    details = db.Column(db.Text)
+    line_description = db.Column(db.Text)
+    benefit = db.Column(db.Text)
+
+    images = db.relationship("ProductImage", backref="product", cascade="all, delete-orphan")
+
+
+class ProductImage(db.Model):
+    __tablename__ = "product_images"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
+    image_data = db.Column(db.LargeBinary, nullable=False)   # store actual image binary
+    mimetype = db.Column(db.String(50))  # e.g. "image/jpeg", "image/png"
+
+
+# ---- Routes ----
 
 @products_bp.route('/upload', methods=['POST'])
 def upload():
@@ -42,139 +45,121 @@ def upload():
     if not (name and prize and details):
         return jsonify({'error': 'Missing fields'}), 400
 
-    # Store product details
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO products (name, prize, details, line_description, benefit) VALUES (?, ?, ?, ?, ?)', (name, prize, details, line_description, benefit))
-        product_id = cursor.lastrowid
+    product = Product(
+        name=name,
+        prize=float(prize),
+        details=details,
+        line_description=line_description,
+        benefit=benefit
+    )
+    db.session.add(product)
+    db.session.commit()
 
-        # Save images
-        for image in images:
-            if image:
-                filename = secure_filename(image.filename)
-                filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
-                image.save(filepath)
-                cursor.execute('INSERT INTO product_images (product_id, filename) VALUES (?, ?)', (product_id, filename))
+    for image in images:
+        if image:
+            img_data = image.read()  # read file as binary
+            mimetype = image.mimetype
+            img = ProductImage(product_id=product.id, image_data=img_data, mimetype=mimetype)
+            db.session.add(img)
 
-        conn.commit()
+    db.session.commit()
 
-    return jsonify({'message': 'Product saved successfully'}), 200
+    return jsonify({'message': 'Product saved successfully'}), 201
 
 
 @products_bp.route('/products', methods=['GET'])
 def get_products():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row  # To access columns by name
-        cursor = conn.cursor()
+    products = Product.query.all()
 
-        # Get all products
-        cursor.execute('SELECT * FROM products')
-        products = cursor.fetchall()
+    result = []
+    for product in products:
+        image_urls = [f"/product_images/{img.id}" for img in product.images]
+        result.append({
+            'id': product.id,
+            'name': product.name,
+            'prize': product.prize,
+            'details': product.details,
+            'images': image_urls
+        })
 
-        # Get all images
-        cursor.execute('SELECT * FROM product_images')
-        images = cursor.fetchall()
+    return jsonify(result), 200
 
-        # Group images by product_id
-        image_map = {}
-        for img in images:
-            pid = img['product_id']
-            filename = img['filename']
-            image_url = f"/static/uploads/{filename}"
-            image_map.setdefault(pid, []).append(image_url)
-
-        # Combine products with their images
-        result = []
-        for product in products:
-            result.append({
-                'id': product['id'],
-                'name': product['name'],
-                'prize': product['prize'],
-                'details': product['details'],
-                'images': image_map.get(product['id'], [])
-            })
-
-        return jsonify(result)
-    
 
 @products_bp.route('/products/<int:product_id>', methods=['DELETE'])
 def delete_product(product_id):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
 
-        # Get image filenames before deleting
-        cursor.execute('SELECT filename FROM product_images WHERE product_id = ?', (product_id,))
-        images = cursor.fetchall()
+    # Delete image files from disk
+    for img in product.images:
+        path = os.path.join(current_app.config['UPLOAD_FOLDER'], img.filename)
+        if os.path.exists(path):
+            os.remove(path)
 
-        # Delete image files from disk
-        for img in images:
-            path = os.path.join(current_app.config['UPLOAD_FOLDER'], img[0])
-            if os.path.exists(path):
-                os.remove(path)
+    db.session.delete(product)
+    db.session.commit()
 
-        # Delete image records
-        cursor.execute('DELETE FROM product_images WHERE product_id = ?', (product_id,))
-        # Delete product
-        cursor.execute('DELETE FROM products WHERE id = ?', (product_id,))
-        conn.commit()
-
-    return jsonify({'message': 'Product deleted successfully'})
+    return jsonify({'message': 'Product deleted successfully'}), 200
 
 
 @products_bp.route('/products/<int:product_id>', methods=['GET'])
 def get_product(product_id):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
 
-        cursor.execute('SELECT * FROM products WHERE id = ?', (product_id,))
-        product = cursor.fetchone()
-        if not product:
-            return jsonify({'error': 'Product not found'}), 404
+    image_urls = [f"/product_images/{img.id}" for img in product.images]
 
-        cursor.execute('SELECT filename FROM product_images WHERE product_id = ?', (product_id,))
-        images = cursor.fetchall()
-        image_urls = [f"/static/uploads/{img['filename']}" for img in images]
+    return jsonify({
+        'id': product.id,
+        'name': product.name,
+        'prize': product.prize,
+        'details': product.details,
+        'benefit': product.benefit,
+        'line_description': product.line_description,
+        'images': image_urls
+    }), 200
 
-        return jsonify({
-            'id': product['id'],
-            'name': product['name'],
-            'prize': product['prize'],
-            'details': product['details'],
-            'benefit': product['benefit'],
-            'line_description': product['line_description'],
-            'images': image_urls
-        })
 
-@products_bp.route('/products/<int:product_id>', methods=['PUT'])
+@products_bp.route("/products/<int:product_id>", methods=["PUT"])
 def update_product(product_id):
-    name = request.form.get('name')
-    prize = request.form.get('prize')
-    details = request.form.get('details')
-    new_images = request.files.getlist('images')
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({"error": "Product not found"}), 404
 
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
+    name = request.form.get("name")
+    prize = request.form.get("prize")
+    details = request.form.get("details")
+    new_images = request.files.getlist("images")
 
-        # Update product details
-        cursor.execute('UPDATE products SET name = ?, prize = ?, details = ? WHERE id = ?',
-                       (name, prize, details, product_id))
+    # Update product details
+    if name:
+        product.name = name
+    if prize:
+        product.prize = float(prize)
+    if details:
+        product.details = details
 
-        # If new images uploaded, delete old ones
-        if new_images:
-            cursor.execute('SELECT filename FROM product_images WHERE product_id = ?', (product_id,))
-            old_images = cursor.fetchall()
-            for img in old_images:
-                path = os.path.join(current_app.config['UPLOAD_FOLDER'], img[0])
-                if os.path.exists(path):
-                    os.remove(path)
-            cursor.execute('DELETE FROM product_images WHERE product_id = ?', (product_id,))
-            for image in new_images:
-                filename = secure_filename(image.filename)
-                path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
-                image.save(path)
-                cursor.execute('INSERT INTO product_images (product_id, filename) VALUES (?, ?)', (product_id, filename))
+    # Replace images if new ones uploaded
+    if new_images:
+        # Delete old images from DB
+        ProductImage.query.filter_by(product_id=product.id).delete()
 
-        conn.commit()
+        # Add new images
+        for image in new_images:
+            img_data = image.read()
+            mimetype = image.mimetype
+            new_img = ProductImage(product_id=product.id, image_data=img_data, mimetype=mimetype)
+            db.session.add(new_img)
 
-    return jsonify({'message': 'Product updated successfully'})
+    db.session.commit()
+    return jsonify({"message": "Product updated successfully"}), 200
+
+@products_bp.route("/product_images/<int:image_id>", methods=["GET"])
+def get_product_image(image_id):
+    img = ProductImage.query.get(image_id)
+    if not img:
+        return jsonify({"error": "Image not found"}), 404
+
+    return send_file(io.BytesIO(img.image_data), mimetype=img.mimetype)
