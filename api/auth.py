@@ -3,7 +3,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import uuid
 
-from api.cart import db  # reuse same SQLAlchemy instance
+from extensions import db  # reuse same SQLAlchemy instance
 
 auth_bp = Blueprint("auth", __name__)
 

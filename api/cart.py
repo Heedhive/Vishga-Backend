@@ -1,9 +1,10 @@
 from flask import Blueprint, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
 import os
 import datetime
 import razorpay
 from extensions import db
+from api.products import Product
+
 # ---- Config ----
 cart_bp = Blueprint('cart', __name__)
 # db = SQLAlchemy()
