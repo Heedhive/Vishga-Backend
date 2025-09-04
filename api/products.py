@@ -67,13 +67,7 @@ def get_products():
 def delete_product(product_id):
     product = Product.query.get(product_id)
     if not product:
-        return jsonify({'error': 'Product not found'}), 404
-
-    # Delete image files from disk
-    for img in product.images:
-        path = os.path.join(current_app.config['UPLOAD_FOLDER'], img.filename)
-        if os.path.exists(path):
-            os.remove(path)
+        return jsonify({'error': 'Product not found'}), 404  
 
     db.session.delete(product)
     db.session.commit()
