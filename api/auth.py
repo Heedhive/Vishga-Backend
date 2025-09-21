@@ -183,3 +183,14 @@ def update_user_profile():
 
     db.session.commit()
     return jsonify({"message": "Profile updated successfully"}), 200
+
+@auth_bp.route("/admin/login", methods=["POST"])
+def admin_login():
+    data = request.get_json()
+    username = data.get("username")
+    password = data.get("password")
+
+    if username == "admin" and password == "adminPassword@vishaga":
+        return jsonify({"message": "Admin login successful"}), 200
+
+    return jsonify({"error": "Invalid admin credentials"}), 401

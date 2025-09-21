@@ -31,6 +31,8 @@ class OrdersHistory(db.Model):
     quantity = db.Column(db.Integer, nullable=False)
     price_at_purchase = db.Column(db.Float, nullable=False)
     purchase_date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    phone_number = db.Column(db.String(20), nullable=True)
+    address = db.Column(db.String(255), nullable=True)
 
 
 # ---- Routes ----
@@ -72,7 +74,9 @@ def get_all_orders_history():
         "product_name": o.product_name,
         "quantity": o.quantity,
         "price_at_purchase": o.price_at_purchase,
-        "purchase_date": o.purchase_date.isoformat()
+        "purchase_date": o.purchase_date.isoformat(),
+        "phone_number": o.phone_number,
+        "address": o.address
     } for o in orders]), 200
 
 @cart_bp.route('/cart/<int:item_id>', methods=['DELETE'])
@@ -137,22 +141,28 @@ def checkout_cart():
     }), 200
 
 
-@cart_bp.route('/cart/buy_item/<int:item_id>', methods=['POST'])
-def buy_single_item(item_id):
+@cart_bp.route('/cart/buy_item', methods=['POST'])
+def buy_single_item():
     data = request.get_json()
-    amount = data.get('amount')
-    currency = data.get('currency', 'INR')
+    product_id = data.get('product_id')
+    quantity = data.get('quantity', 1)
 
-    item = Cart.query.get(item_id)
-    if not item:
-        return jsonify({'message': 'Cart item not found'}), 404
+    if not product_id:
+        return jsonify({'error': 'Product ID is required'}), 400
 
-    order_amount = int(amount * 100)
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({'message': 'Product not found'}), 404
+
+    order_amount = int(product.prize * quantity * 100)
 
     order_data = {
         'amount': order_amount,
-        'currency': currency,
-        'receipt': f'order_rcptid_{item.user_id}_{datetime.datetime.now().timestamp()}'
+        'currency': 'INR',
+        'receipt': f'order_rcptid_{product_id}_{datetime.datetime.now().timestamp()}',
+        'notes': {
+            'quantity': quantity
+        }
     }
     razorpay_order = razorpay_client.order.create(order_data)
 
@@ -186,6 +196,8 @@ def verify_payment():
     razorpay_payment_id = data.get('razorpay_payment_id')
     razorpay_signature = data.get('razorpay_signature')
     user_id = data.get('user_id')
+    phone_number = data.get('phone_number')
+    address = data.get('address')
 
     if not user_id:
         return jsonify({'error': 'User ID is required'}), 400
@@ -201,24 +213,49 @@ def verify_payment():
     except razorpay.errors.SignatureVerificationError:
         return jsonify({'error': 'Invalid payment signature'}), 400
 
-    # Move items from cart to orders_history
     cart_items = Cart.query.filter_by(user_id=user_id).all()
-    if not cart_items:
-        return jsonify({'message': 'Cart is empty'}), 400
 
-    for item in cart_items:
-        product = Product.query.get(item.product_id)
+    # if not cart_items:
+        # Handle single item purchase
+    try:
+        order = razorpay_client.order.fetch(razorpay_order_id)
+        receipt = order['receipt']
+        product_id = int(receipt.split('_')[2])
+        quantity = order['notes']['quantity']
+
+        product = Product.query.get(product_id)
+
         if product:
             new_order = OrdersHistory(
                 user_id=user_id,
-                product_id=item.product_id,
-                product_name=item.product_name,
-                quantity=item.quantity,
+                product_id=product.id,
+                product_name=product.name,
+                quantity=quantity,
                 price_at_purchase=product.prize,
-                purchase_date=datetime.datetime.utcnow()
+                purchase_date=datetime.datetime.utcnow(),
+                phone_number=phone_number,
+                address=address
             )
             db.session.add(new_order)
-            db.session.delete(item)
+    except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    # else:
+    #     # Move items from cart to orders_history
+    #     for item in cart_items:
+    #         product = Product.query.get(item.product_id)
+    #         if product:
+    #             new_order = OrdersHistory(
+    #                 user_id=user_id,
+    #                 product_id=item.product_id,
+    #                 product_name=item.product_name,
+    #                 quantity=item.quantity,
+    #                 price_at_purchase=product.prize,
+    #                 purchase_date=datetime.datetime.utcnow(),
+    #                 phone_number=phone_number,
+    #                 address=address
+    #             )
+    #             db.session.add(new_order)
+    #             db.session.delete(item)
 
     db.session.commit()
 
